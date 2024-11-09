@@ -1,0 +1,159 @@
+from flask import Flask, request, redirect, url_for, session
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+import random
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key'  # Replace with a secure secret key for session management
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///game.db'
+db = SQLAlchemy(app)
+
+# Database model for users
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    high_score = db.Column(db.Integer, nullable=True)
+
+# Ensure the database tables are created within the app context
+with app.app_context():
+    db.create_all()
+
+# Route for user registration
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+
+        # Check if username already exists
+        existing_user = User.query.filter_by(username=username).first()
+        if existing_user:
+            return "Username already exists. Please choose a different one."
+
+        # Hash the password and create a new user
+        hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+        new_user = User(username=username, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect(url_for("login"))
+
+    # Registration form
+    return """
+    <form method="POST">
+        <label>Username:</label><input type="text" name="username" required><br>
+        <label>Password:</label><input type="password" name="password" required><br>
+        <button type="submit">Register</button>
+    </form>
+    """
+
+# Route for user login
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+
+        # Verify user's credentials
+        user = User.query.filter_by(username=username).first()
+        if user and check_password_hash(user.password, password):
+            session["user_id"] = user.id
+            return redirect(url_for("game"))
+        else:
+            return "Invalid username or password."
+
+    # Login form
+    return """
+    <form method="POST">
+        <label>Username:</label><input type="text" name="username" required><br>
+        <label>Password:</label><input type="password" name="password" required><br>
+        <button type="submit">Login</button>
+    </form>
+    """
+
+# Route for user logout
+@app.route("/logout")
+def logout():
+    session.pop("user_id", None)
+    return redirect(url_for("login"))
+
+# Route for the number guessing game
+@app.route("/game", methods=["GET", "POST"])
+def game():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    # Initialize the game variables in the session if they don't exist
+    if "secret_number" not in session:
+        session["secret_number"] = random.randint(1, 100)
+        session["attempts"] = 0
+
+    message = ""
+    if request.method == "POST":
+        try:
+            guess = int(request.form["guess"])
+            session["attempts"] += 1
+
+            # Check the guess
+            if guess < session["secret_number"]:
+                message = "Too low! Try again."
+            elif guess > session["secret_number"]:
+                message = "Too high! Try again."
+            else:
+                # User guessed correctly
+                user = User.query.get(session["user_id"])
+                if user.high_score is None or session["attempts"] < user.high_score:
+                    user.high_score = session["attempts"]
+                    db.session.commit()
+                message = f"Congratulations! You guessed the number in {session['attempts']} attempts."
+                # Reset the game
+                session.pop("secret_number", None)
+                session.pop("attempts", None)
+        except ValueError:
+            message = "Please enter a valid number."
+
+    # Game form and feedback
+    return f"""
+    <h1>Number Guessing Game</h1>
+    <p>I have chosen a number between 1 and 100. Can you guess it?</p>
+    <p><strong>{message}</strong></p>
+    <p>Attempts: {session.get("attempts", 0)}</p>
+    <form method="POST">
+        <label for="guess">Enter your guess:</label>
+        <input type="number" name="guess" id="guess" required>
+        <button type="submit">Submit</button>
+    </form>
+    <p><a href="/leaderboard">View Leaderboard</a> | <a href="/logout">Logout</a></p>
+    """
+
+# Route for the leaderboard
+@app.route("/leaderboard")
+def leaderboard():
+    # Query the top 10 users by high score (least attempts)
+    top_users = User.query.filter(User.high_score.isnot(None)).order_by(User.high_score).limit(10).all()
+
+    # HTML table for leaderboard
+    leaderboard_html = """
+    <h1>Leaderboard</h1>
+    <table border="1">
+        <tr>
+            <th>Rank</th>
+            <th>Username</th>
+            <th>High Score (Attempts)</th>
+        </tr>
+    """
+    for rank, user in enumerate(top_users, start=1):
+        leaderboard_html += f"""
+        <tr>
+            <td>{rank}</td>
+            <td>{user.username}</td>
+            <td>{user.high_score}</td>
+        </tr>
+        """
+    leaderboard_html += "</table>"
+    leaderboard_html += '<p><a href="/game">Back to Game</a></p>'
+
+    return leaderboard_html
+
+if __name__ == "__main__":
+    app.run(debug=True)
